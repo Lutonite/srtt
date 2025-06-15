@@ -1,0 +1,108 @@
+name: SRTT sync automation
+
+on:
+  schedule:
+    - cron: "0 2/3 * * *"
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  srtt-operations:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          mkdir -p raw
+          mkdir -p output
+
+      - name: Restore data artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            raw/
+            trains.db
+          key: srtt-data-${{ github.run_id }}
+          restore-keys: |
+            srtt-data-
+
+      - name: Determine operation based on schedule
+        id: determine-op
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            if [[ "${{ github.event.schedule }}" == "0 2/3 * * *" ]]; then
+              echo "operation=all" >> $GITHUB_OUTPUT
+            else
+              echo "operation=sync" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "operation=all" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run migrations
+        run: python srtt.py migrate
+
+      - name: Run scan
+        if: steps.determine-op.outputs.operation == 'all'
+        run: python srtt.py scan
+
+      - name: Run sync
+        if: steps.determine-op.outputs.operation == 'sync' || steps.determine-op.outputs.operation == 'all'
+        run: python srtt.py sync
+
+      - name: Run make
+        if: steps.determine-op.outputs.operation == 'all'
+        run: python srtt.py make
+
+      - name: Save data artifacts
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            raw/
+            trains.db
+          key: srtt-data-${{ github.run_id }}
+
+      - name: Setup Pages
+        if: steps.determine-op.outputs.operation == 'all'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: steps.determine-op.outputs.operation == 'all'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./output
+
+      - name: Deploy to GitHub Pages
+        if: steps.determine-op.outputs.operation == 'all'
+        id: deployment
+        uses: actions/deploy-pages@v4
